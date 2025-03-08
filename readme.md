@@ -15,8 +15,5 @@ Tomato Ripeness Recognition System — это веб-приложение на F
 ## Установка
 
 ```bash
-git clone <repository-url>
-cd tomato_ripeness_project
-python -m venv venv
-source venv/bin/activate  # Для Windows: venv\Scripts\activate
+gh repo clone gelios02/tomatos_ripeness
 pip install -r requirements.txt
