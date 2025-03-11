@@ -2,8 +2,7 @@ import cv2
 import numpy as np
 import math
 from ultralytics import YOLO
-from app import db, TomatoRecognition, app  # Импортируем app, db и модель распознавания
-
+from app import db, TomatoRecognition
 # Инициализируем каскад для обнаружения лиц
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 

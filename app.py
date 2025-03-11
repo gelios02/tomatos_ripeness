@@ -4,7 +4,7 @@ from flask_login import LoginManager, login_user, login_required, logout_user, c
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 from sqlalchemy import func
-from Detector import gen_frames
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
@@ -166,6 +166,7 @@ def camera_page(cam_id):
 @app.route('/video_feed')
 @login_required
 def video_feed():
+    from Detector import gen_frames  # Избегаем циклического импорта
     return Response(gen_frames(current_user.settings, current_user.id, camera_id=0),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
