@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import math
 from ultralytics import YOLO
-from flask import current_app
+from app import app
 from app import db, TomatoRecognition
 # Инициализируем каскад для обнаружения лиц
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -157,7 +157,8 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 collected = ""
 
                 # Сохраняем результат в БД в контексте приложения
-                with current_app.app_context():
+                with app.app_context():
+
 
                     rec = TomatoRecognition(
                         tomato_id=assigned_id,
