@@ -156,7 +156,8 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 collected = ""
 
                 # Сохраняем результат в БД в контексте приложения
-                with app.app_context():
+                with current_app.app_context():
+
                     rec = TomatoRecognition(
                         tomato_id=assigned_id,
                         mean_h=mean_h,
