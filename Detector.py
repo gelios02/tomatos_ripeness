@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 import math
 from ultralytics import YOLO
-from app import app
-from app import db, TomatoRecognition
+from app import app, db, TomatoRecognition
+
 # Инициализируем каскад для обнаружения лиц
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
@@ -20,19 +20,16 @@ def compute_iou(boxA, boxB):
     yA = max(boxA[1], boxB[1])
     xB = min(boxA[2], boxB[2])
     yB = min(boxA[3], boxB[3])
-    interWidth = max(0, xB - xA + 1)
-    interHeight = max(0, yB - yA + 1)
-    interArea = interWidth * interHeight
+    interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
     boxAArea = (boxA[2] - boxA[0] + 1) * (boxA[3] - boxA[1] + 1)
     boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
-    iou = interArea / float(boxAArea + boxBArea - interArea)
-    return iou
+    return interArea / float(boxAArea + boxBArea - interArea)
 
 
 def gen_frames(user_settings, user_id, camera_id=0):
     """
     Генерирует поток JPEG‑изображений с камеры, проводя детекцию томатов.
-    Фильтрует объекты, пересекающиеся с лицами (IoU > 0.3).
+    Фильтрует объекты, пересекающиеся с лицами (если центр bbox попадает в bbox лица или IoU > 0.3).
 
     Параметры:
       user_settings – объект настроек пользователя (содержит conf_threshold, desired_ripeness, max_harvest_time)
@@ -63,17 +60,21 @@ def gen_frames(user_settings, user_id, camera_id=0):
         frame_count += 1
         h, w, _ = frame.shape
 
-        # Детектируем лица на кадре для фильтрации ложных детекций
+        # Детектируем лица для фильтрации
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
         face_boxes = []
         for (fx, fy, fw, fh) in faces:
             face_boxes.append([fx, fy, fx + fw, fy + fh])
 
+        # Дополнительная проверка: если центр bbox попадает в bbox лица, пропускаем объект
+        def center_in_face(center, face_box):
+            return (center[0] >= face_box[0] and center[0] <= face_box[2] and
+                    center[1] >= face_box[1] and center[1] <= face_box[3])
+
         results = detection_model.predict(frame, verbose=False)
         for result in results:
-            boxes = result.boxes
-            for box in boxes:
+            for box in result.boxes:
                 conf = float(box.conf)
                 if conf < conf_threshold:
                     continue
@@ -81,14 +82,13 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w - 1, x2), min(h - 1, y2)
 
-                # Проверка: если bbox от YOLO пересекается с лицом, пропускаем объект
+                # Проверка по IoU с лицами
                 yolo_box = [x1, y1, x2, y2]
-                skip = False
-                for face_box in face_boxes:
-                    if compute_iou(yolo_box, face_box) > 0.3:
-                        skip = True
-                        break
-                if skip:
+                if any(compute_iou(yolo_box, face_box) > 0.3 for face_box in face_boxes):
+                    continue
+                # Проверка: если центр bbox находится внутри bbox лица, пропускаем объект
+                center = ((x1 + x2) / 2, (y1 + y2) / 2)
+                if any(center_in_face(center, face_box) for face_box in face_boxes):
                     continue
 
                 width = x2 - x1
@@ -99,13 +99,35 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 if aspect_ratio < 0.7 or aspect_ratio > 1.3:
                     continue
 
+                # Получаем ROI томата
                 tomato_roi = frame[y1:y2, x1:x2]
                 if tomato_roi.size == 0:
                     continue
 
-                hsv_roi = cv2.cvtColor(tomato_roi, cv2.COLOR_BGR2HSV)
-                lab_roi = cv2.cvtColor(tomato_roi, cv2.COLOR_BGR2LAB)
+                # Обрезаем центральную область ROI, чтобы уменьшить влияние фона
+                h_roi, w_roi = tomato_roi.shape[:2]
+                margin_x = int(w_roi * 0.1)
+                margin_y = int(h_roi * 0.1)
+                cropped_roi = tomato_roi[margin_y:h_roi - margin_y, margin_x:w_roi - margin_x]
+                if cropped_roi.size == 0:
+                    cropped_roi = tomato_roi
 
+                # Применяем маску по насыщенности: оставляем только высоконасыщенные пиксели (например, > 100)
+                hsv_full = cv2.cvtColor(cropped_roi, cv2.COLOR_BGR2HSV)
+                sat = hsv_full[:, :, 1]
+                sat_mask = cv2.inRange(sat, 100, 255)
+                # Применяем маску к обрезанному изображению
+                masked_roi = cv2.bitwise_and(cropped_roi, cropped_roi, mask=sat_mask)
+
+                hsv_roi = cv2.cvtColor(masked_roi, cv2.COLOR_BGR2HSV)
+                lab_roi = cv2.cvtColor(masked_roi, cv2.COLOR_BGR2LAB)
+
+                # Если маскированное изображение пустое, вернём исходное cropped_roi
+                if cv2.countNonZero(sat_mask) == 0:
+                    hsv_roi = cv2.cvtColor(cropped_roi, cv2.COLOR_BGR2HSV)
+                    lab_roi = cv2.cvtColor(cropped_roi, cv2.COLOR_BGR2LAB)
+
+                # Вычисляем средние значения по каналам на маскированном изображении
                 mean_h = hsv_roi[:, :, 0].mean()
                 mean_s = hsv_roi[:, :, 1].mean()
                 mean_v = hsv_roi[:, :, 2].mean()
@@ -113,11 +135,20 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 mean_a = lab_roi[:, :, 1].mean()
                 mean_b = lab_roi[:, :, 2].mean()
 
-                hsv_hue = hsv_roi[:, :, 0]
-                total_pixels = hsv_hue.size
-                red_pixels = np.count_nonzero((hsv_hue < 10) | (hsv_hue > 170))
-                yellow_pixels = np.count_nonzero((hsv_hue >= 15) & (hsv_hue <= 35))
-                green_pixels = np.count_nonzero((hsv_hue > 40) & (hsv_hue < 80))
+                # Рассчитываем распределение цвета только на маскированном изображении
+                total_pixels = cv2.countNonZero(sat_mask)
+                if total_pixels == 0:
+                    total_pixels = hsv_roi.shape[0] * hsv_roi.shape[1]
+                red_mask1 = cv2.inRange(hsv_roi, np.array([0, 100, 100]), np.array([10, 255, 255]))
+                red_mask2 = cv2.inRange(hsv_roi, np.array([170, 100, 100]), np.array([180, 255, 255]))
+                red_mask = cv2.bitwise_or(red_mask1, red_mask2)
+                red_pixels = cv2.countNonZero(red_mask)
+
+                yellow_mask = cv2.inRange(hsv_roi, np.array([15, 100, 100]), np.array([35, 255, 255]))
+                yellow_pixels = cv2.countNonZero(yellow_mask)
+
+                green_mask = cv2.inRange(hsv_roi, np.array([40, 100, 100]), np.array([80, 255, 255]))
+                green_pixels = cv2.countNonZero(green_mask)
 
                 red_ratio = red_pixels / total_pixels
                 yellow_ratio = yellow_pixels / total_pixels
@@ -141,10 +172,10 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 else:
                     time_to_harvest = 0
 
-                center = ((x1 + x2) / 2, (y1 + y2) / 2)
                 assigned_id = None
                 for tid, (prev_center, last_seen) in tracked_tomatoes.items():
-                    if distance(center, prev_center) < tracking_distance_threshold:
+                    if math.sqrt((center[0] - prev_center[0]) ** 2 + (
+                            center[1] - prev_center[1]) ** 2) < tracking_distance_threshold:
                         assigned_id = tid
                         tracked_tomatoes[tid] = (center, frame_count)
                         break
@@ -156,10 +187,7 @@ def gen_frames(user_settings, user_id, camera_id=0):
                 is_ripe = "Yes" if classification in ["Ripe", "Yellow"] else "No"
                 collected = ""
 
-                # Сохраняем результат в БД в контексте приложения
                 with app.app_context():
-
-
                     rec = TomatoRecognition(
                         tomato_id=assigned_id,
                         mean_h=mean_h,
